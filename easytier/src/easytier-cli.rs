@@ -74,7 +74,7 @@ use easytier::{
         common::{NatType, PortForwardConfigPb, SocketType},
         peer_rpc::{GetGlobalPeerMapRequest, PeerCenterRpc, PeerCenterRpcClientFactory},
         rpc_impl::standalone::StandAloneClient,
-        rpc_types::controller::BaseController,
+        rpc_types::{controller::BaseController, error::Error as RpcError},
     },
     tunnel::{TunnelScheme, tcp::TcpTunnelConnector},
     utils::{PeerRoutePair, string::cost_to_str},
@@ -193,8 +193,11 @@ struct PeerArgs {
 
 #[derive(Subcommand, Debug)]
 enum PeerSubCommand {
+    /// List connected peers
     List,
+    /// Show public IPv6 address information
     Ipv6,
+    /// List foreign networks discovered by this instance
     ListForeign {
         #[arg(
             long,
@@ -203,6 +206,7 @@ enum PeerSubCommand {
         )]
         trusted_keys: bool,
     },
+    /// List global foreign networks from the peer center
     ListGlobalForeign,
 }
 
@@ -214,16 +218,18 @@ struct RouteArgs {
 
 #[derive(Subcommand, Debug)]
 enum RouteSubCommand {
+    /// List routes propagated by peers
     List,
+    /// Dump routes in CIDR format
     Dump,
 }
 
 #[derive(Args, Debug)]
 struct ConnectorArgs {
-    #[arg(short, long)]
+    #[arg(short, long, help = "filter connectors by virtual IPv4 address")]
     ipv4: Option<String>,
 
-    #[arg(short, long)]
+    #[arg(short, long, help = "filter connectors by peer URL")]
     peers: Vec<String>,
 
     #[command(subcommand)]
@@ -242,6 +248,7 @@ enum ConnectorSubCommand {
         #[arg(help = "connector url, e.g., tcp://1.2.3.4:11010")]
         url: String,
     },
+    /// List connectors
     List,
 }
 
@@ -283,6 +290,7 @@ struct AclArgs {
 
 #[derive(Subcommand, Debug)]
 enum AclSubCommand {
+    /// Show ACL rule hit statistics
     Stats,
 }
 
@@ -450,19 +458,25 @@ struct InstallArgs {
     #[arg(long, default_value = env!("CARGO_PKG_DESCRIPTION"), help = "service description")]
     description: String,
 
-    #[arg(long)]
+    #[arg(long, help = "display name shown by the service manager")]
     display_name: Option<String>,
 
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "whether to disable starting the service automatically on boot (true/false)"
+    )]
     disable_autostart: Option<bool>,
 
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "whether to disable automatic restart when the service fails (true/false)"
+    )]
     disable_restart_on_failure: Option<bool>,
 
     #[arg(long, help = "path to easytier-core binary")]
     core_path: Option<PathBuf>,
 
-    #[arg(long)]
+    #[arg(long, help = "working directory for the easytier-core service")]
     service_work_dir: Option<PathBuf>,
 
     #[arg(
@@ -525,6 +539,40 @@ type RpcClient = StandAloneClient<TcpTunnelConnector>;
 type LocalBoxFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, Error>> + 'a>>;
 type ForeignNetworkMap = BTreeMap<String, ForeignNetworkEntryPb>;
 type GlobalForeignNetworkMap = BTreeMap<u32, list_global_foreign_network_response::ForeignNetworks>;
+
+fn is_missing_web_client_service(error: &RpcError) -> bool {
+    matches!(
+        error,
+        RpcError::InvalidServiceKey(service_name, _)
+            if service_name.trim_matches('"') == "WebClientService"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_web_client_service_matches_raw_service_name() {
+        let error = RpcError::InvalidServiceKey("WebClientService".to_string(), "".to_string());
+
+        assert!(is_missing_web_client_service(&error));
+    }
+
+    #[test]
+    fn missing_web_client_service_matches_serialized_service_name() {
+        let error = RpcError::InvalidServiceKey("\"WebClientService\"".to_string(), "".to_string());
+
+        assert!(is_missing_web_client_service(&error));
+    }
+
+    #[test]
+    fn missing_web_client_service_rejects_other_services() {
+        let error = RpcError::InvalidServiceKey("PeerManageRpc".to_string(), "".to_string());
+
+        assert!(!is_missing_web_client_service(&error));
+    }
+}
 
 #[derive(serde::Serialize)]
 struct PeerListData {
@@ -599,9 +647,15 @@ impl<'a> CommandHandler<'a> {
         }
 
         let client = self.get_manage_client().await?;
-        let inst_ids = client
+        let list_response = match client
             .list_network_instance(BaseController::default(), ListNetworkInstanceRequest {})
-            .await?
+            .await
+        {
+            Ok(response) => response,
+            Err(error) if is_missing_web_client_service(&error) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let inst_ids = list_response
             .inst_ids
             .into_iter()
             .map(uuid::Uuid::from)
