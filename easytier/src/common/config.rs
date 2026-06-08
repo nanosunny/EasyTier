@@ -278,20 +278,20 @@ pub struct NetworkIdentity {
 pub enum ConfigSource {
     #[default]
     User,
-    Webhook,
+    Web,
 }
 
 impl ConfigSource {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
-            Self::Webhook => "webhook",
+            Self::Web => "web",
         }
     }
 
     pub fn from_rpc(source: i32) -> Option<Self> {
         match RpcConfigSource::try_from(source).ok() {
-            Some(RpcConfigSource::Webhook) => Some(Self::Webhook),
+            Some(RpcConfigSource::Web) => Some(Self::Web),
             Some(RpcConfigSource::User) => Some(Self::User),
             _ => None,
         }
@@ -300,7 +300,7 @@ impl ConfigSource {
     pub fn to_rpc(self) -> i32 {
         match self {
             Self::User => RpcConfigSource::User as i32,
-            Self::Webhook => RpcConfigSource::Webhook as i32,
+            Self::Web => RpcConfigSource::Web as i32,
         }
     }
 }
@@ -311,7 +311,7 @@ impl std::str::FromStr for ConfigSource {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "user" => Ok(Self::User),
-            "webhook" => Ok(Self::Webhook),
+            "web" => Ok(Self::Web),
             other => Err(format!("unknown network config source: {other}")),
         }
     }
@@ -636,21 +636,12 @@ impl TomlConfigLoader {
         Ok(ret)
     }
 
-    fn gen_flags(mut flags_hashmap: serde_json::Map<String, serde_json::Value>) -> Flags {
-        let default_flags_json = serde_json::to_string(&gen_default_flags()).unwrap();
-        let default_flags_hashmap =
-            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&default_flags_json)
-                .unwrap();
-
-        let mut merged_hashmap = serde_json::Map::new();
-        for (key, value) in default_flags_hashmap {
-            if let Some(v) = flags_hashmap.remove(&key) {
-                merged_hashmap.insert(key, v);
-            } else {
-                merged_hashmap.insert(key, value);
-            }
-        }
-
+    fn gen_flags(flags_hashmap: serde_json::Map<String, serde_json::Value>) -> Flags {
+        let mut merged_hashmap = match serde_json::to_value(gen_default_flags()) {
+            Ok(serde_json::Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        };
+        merged_hashmap.extend(flags_hashmap);
         serde_json::from_value(serde_json::Value::Object(merged_hashmap)).unwrap()
     }
 }
@@ -1366,14 +1357,14 @@ stun_servers = [
         let config = TomlConfigLoader::default();
         assert_eq!(config.get_network_config_source(), ConfigSource::User);
 
-        config.set_network_config_source(Some(ConfigSource::Webhook));
+        config.set_network_config_source(Some(ConfigSource::Web));
         let dumped = config.dump();
 
         assert!(dumped.contains("[source]"));
-        assert!(dumped.contains("source = \"webhook\""));
+        assert!(dumped.contains("source = \"web\""));
 
         let loaded = TomlConfigLoader::new_from_str(&dumped).unwrap();
-        assert_eq!(loaded.get_network_config_source(), ConfigSource::Webhook);
+        assert_eq!(loaded.get_network_config_source(), ConfigSource::Web);
     }
 
     #[test]
